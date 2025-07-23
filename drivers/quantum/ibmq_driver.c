@@ -1,48 +1,49 @@
 #include <linux/module.h>
 #include <linux/fs.h>
 #include <linux/uaccess.h>
+#include <linux/netlink.h>
+#include <linux/skbuff.h>
 #include <linux/quantum.h>
 
-static int quantum_open(struct inode *inode, struct file *file) {
-    printk(KERN_INFO "Quantum: Dispositivo abierto\n");
-    return 0;
+static struct sock *nl_sock;
+
+// Callback para recibir datos desde userspace via Netlink
+static void quantum_nl_recv_msg(struct sk_buff *skb) {
+    struct nlmsghdr *nlh = nlmsg_hdr(skb);
+    printk(KERN_INFO "Quantum: Mensaje recibido desde userspace: %s\n", (char *)NLMSG_DATA(nlh));
 }
 
-static ssize_t quantum_write(struct file *file, const char __user *buf, 
-                            size_t len, loff_t *ppos) {
-    char *data = kmalloc(len + 1, GFP_KERNEL);
-    if (!data) return -ENOMEM;
+// Enviar circuito a userspace
+static void quantum_send_to_userspace(const char *circuit) {
+    struct sk_buff *skb;
+    struct nlmsghdr *nlh;
+    int size = strlen(circuit) + 1;
 
-    if (copy_from_user(data, buf, len)) {
-        kfree(data);
-        return -EFAULT;
-    }
+    skb = nlmsg_new(size, GFP_KERNEL);
+    nlh = nlmsg_put(skb, 0, 0, NLMSG_DONE, size, 0);
+    NETLINK_CB(skb).dst_group = 0;
+    strncpy(nlmsg_data(nlh), circuit, size);
+
+    nlmsg_unicast(nl_sock, skb, 0); // PID 0 = userspace daemon
+}
+
+static ssize_t quantum_write(struct file *file, const char __user *buf, size_t len, loff_t *ppos) {
+    char *data = kmalloc(len + 1, GFP_KERNEL);
+    copy_from_user(data, buf, len);
     data[len] = '\0';
-    printk(KERN_INFO "Quantum: Circuito recibido:\n%s\n", data);
+    
+    quantum_send_to_userspace(data); // Enviar a userspace
     kfree(data);
     return len;
 }
 
-static struct file_operations quantum_fops = {
-    .owner = THIS_MODULE,
-    .open = quantum_open,
-    .write = quantum_write,
-};
-
 static int __init quantum_init(void) {
-    if (register_chrdev(QUANTUM_MAJOR, "quantum", &quantum_fops)) {
-        printk(KERN_ERR "Quantum: Error al registrar dispositivo\n");
-        return -1;
-    }
-    printk(KERN_INFO "Quantum: Driver registrado (major %d)\n", QUANTUM_MAJOR);
+    struct netlink_kernel_cfg cfg = {
+        .input = quantum_nl_recv_msg,
+    };
+
+    nl_sock = netlink_kernel_create(&init_net, QUANTUM_NETLINK_TYPE, &cfg);
+    register_chrdev(QUANTUM_MAJOR, "quantum", &quantum_fops);
+    printk(KERN_INFO "Quantum: Driver listo (Netlink type %d)\n", QUANTUM_NETLINK_TYPE);
     return 0;
 }
-
-static void __exit quantum_exit(void) {
-    unregister_chrdev(QUANTUM_MAJOR, "quantum");
-    printk(KERN_INFO "Quantum: Driver eliminado\n");
-}
-
-module_init(quantum_init);
-module_exit(quantum_exit);
-MODULE_LICENSE("GPL");
