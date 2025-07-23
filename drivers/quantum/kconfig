@@ -1,0 +1,6 @@
+config QUANTUM_IBMQ
+    tristate "IBM Quantum Driver"
+    depends on NET
+    select NETLINK
+    help
+      Soporte para hardware cuántico de IBM via Netlink.
